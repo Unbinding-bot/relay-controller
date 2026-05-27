@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Relay Controller</title>
+  <!-- MQTT.js via CDN -->
+  <script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: monospace;
+      background: #f5f5f5;
+      color: #111;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px;
+    }
+
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    .subtitle { font-size: 0.8rem; color: #666; margin-bottom: 32px; }
+
+    .card {
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 24px;
+      width: 100%;
+      max-width: 420px;
+      margin-bottom: 16px;
+    }
+
+    .card h2 { font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; color: #555; }
+
+    /* Status badge */
+    .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; }
+    .dot.on  { background: #22c55e; }
+    .dot.off { background: #ef4444; }
+    .status-text { font-size: 0.85rem; }
+
+    /* Buttons */
+    .btn-row { display: flex; gap: 10px; }
+    button {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 0.9rem;
+      transition: background 0.15s;
+    }
+    button:hover { background: #f0f0f0; }
+    button.active-on  { background: #22c55e; color: white; border-color: #22c55e; }
+    button.active-off { background: #ef4444; color: white; border-color: #ef4444; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Inputs */
+    label { display: block; font-size: 0.8rem; margin-bottom: 4px; color: #555; }
+    input[type="number"], input[type="time"] {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.9rem;
+      margin-bottom: 12px;
+    }
+    .inline-row { display: flex; gap: 10px; }
+    .inline-row > div { flex: 1; }
+
+    .btn-full {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #333;
+      border-radius: 6px;
+      background: #111;
+      color: white;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
+    .btn-full:hover { background: #333; }
+    .btn-full:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-cancel {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+      font-family: monospace;
+      font-size: 0.85rem;
+      margin-top: 6px;
+      color: #555;
+    }
+    .btn-cancel:hover { background: #f0f0f0; }
+
+    /* Alarm list */
+    .alarm-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+      font-size: 0.85rem;
+    }
+    .alarm-item:last-child { border-bottom: none; }
+    .del-btn {
+      background: none;
+      border: none;
+      color: #ef4444;
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 0 4px;
+      flex: none;
+    }
+    .del-btn:hover { background: none; }
+
+    /* Connection bar */
+    .conn-bar {
+      font-size: 0.75rem;
+      color: #888;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: #ccc; }
+    .conn-dot.connected { background: #22c55e; }
+
+    /* Device ID config */
+    .config-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+      width: 100%;
+      max-width: 420px;
+    }
+    .config-row input {
+      flex: 1;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.85rem;
+    }
+    .config-row button {
+      flex: none;
+      padding: 8px 14px;
+    }
+
+    .countdown { font-size: 0.8rem; color: #888; margin-top: 8px; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+
+<h1>Relay Controller</h1>
+<p class="subtitle">ESP8266 NodeMCU — D1 Pin</p>
+
+<!-- Device ID config -->
+<div class="config-row">
+  <input id="deviceIdInput" type="text" placeholder="Device ID (e.g. mydevice123)" />
+  <button onclick="applyDeviceId()">Connect</button>
+</div>
+
+<!-- Connection status -->
+<div class="conn-bar">
+  <div class="conn-dot" id="connDot"></div>
+  <span id="connLabel">Not connected</span>
+</div>
+
+<!-- Manual Control -->
+<div class="card">
+  <h2>Manual Control</h2>
+  <div class="status-row">
+    <div class="dot" id="relayDot"></div>
+    <span class="status-text" id="relayStatus">Unknown</span>
+  </div>
+  <div class="btn-row">
+    <button id="btnOn"  onclick="sendCommand('ON')"  disabled>Turn ON</button>
+    <button id="btnOff" onclick="sendCommand('OFF')" disabled>Turn OFF</button>
+  </div>
+</div>
+
+<!-- Timer -->
+<div class="card">
+  <h2>Timer</h2>
+  <div class="inline-row">
+    <div>
+      <label>Wait (minutes)</label>
+      <input type="number" id="timerDelay" min="0" value="5" />
+    </div>
+    <div>
+      <label>ON duration (seconds)</label>
+      <input type="number" id="timerDuration" min="1" value="30" />
+    </div>
+  </div>
+  <button class="btn-full" id="btnTimer" onclick="startTimer()" disabled>Start Timer</button>
+  <button class="btn-cancel" id="btnCancelTimer" onclick="cancelTimer()" style="display:none">Cancel Timer</button>
+  <div class="countdown" id="timerCountdown"></div>
+</div>
+
+<!-- Alarms -->
+<div class="card">
+  <h2>Alarms</h2>
+  <div class="inline-row">
+    <div>
+      <label>Time (daily)</label>
+      <input type="time" id="alarmTime" value="06:00" />
+    </div>
+    <div>
+      <label>ON duration (seconds)</label>
+      <input type="number" id="alarmDuration" min="1" value="3" />
+    </div>
+  </div>
+  <button class="btn-full" onclick="addAlarm()">Add Alarm</button>
+  <div id="alarmList" style="margin-top:12px;"></div>
+</div>
+
+<script>
+  // ─── STATE ──────────────────────────────────────────────────────────
+  let client = null;
+  let deviceId = localStorage.getItem('relayDeviceId') || '';
+  let topicCommand = '';
+  let topicStatus  = '';
+  let topicAlarmsState = '';
+  let relayState   = 'OFF';
+  let timerTimeout = null;
+  let timerOffTimeout = null;
+  let timerInterval = null;
+  let alarms = JSON.parse(localStorage.getItem('relayAlarms') || '[]');
+  let alarmInterval = null;
+  let activeAlarmTimeouts = {};
+
+  // ─── INIT ────────────────────────────────────────────────────────────
+  window.onload = () => {
+    if (deviceId) {
+      document.getElementById('deviceIdInput').value = deviceId;
+      applyDeviceId();
+    }
+    renderAlarms();
+    startAlarmChecker();
+  };
+
+  function applyDeviceId() {
+    const input = document.getElementById('deviceIdInput').value.trim();
+    if (!input) return alert('Please enter a Device ID.');
+    deviceId = input;
+    localStorage.setItem('relayDeviceId', deviceId);
+    topicCommand     = `relay/${deviceId}/command`;
+    topicStatus      = `relay/${deviceId}/status`;
+    topicAlarmsState = `relay/${deviceId}/alarms/state`;
+    connectMQTT();
+  }
+
+  // ─── MQTT ────────────────────────────────────────────────────────────
+  function connectMQTT() {
+    if (client) { client.end(true); }
+    setConnStatus(false);
+
+    // Use HiveMQ's free WebSocket endpoint (port 8000, no auth needed)
+    client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+      clientId: 'web-' + deviceId + '-' + Math.random().toString(16).slice(2, 8),
+      clean: true,
+      reconnectPeriod: 3000,
+    });
+
+    client.on('connect', () => {
+      setConnStatus(true);
+      client.subscribe(topicStatus, { qos: 0 });
+      client.subscribe(topicAlarmsState, { qos: 0 });
+      setControlsEnabled(true);
+      // Re-push saved alarms to device in case it rebooted
+      pushAlarmsToDevice();
+    });
+
+    client.on('message', (topic, payload) => {
+      if (topic === topicStatus) {
+        relayState = payload.toString().trim();
+        updateRelayUI();
+      } else if (topic === topicAlarmsState) {
+        syncAlarmsFromDevice(payload.toString().trim());
+      }
+    });
+
+    client.on('close', () => { setConnStatus(false); setControlsEnabled(false); });
+    client.on('error', (e) => console.error('MQTT error', e));
+  }
+
+  function sendCommand(cmd) {
+    if (!client || !client.connected) return;
+    client.publish(topicCommand, cmd, { qos: 0, retain: false });
+  }
+
+  // ─── UI HELPERS ──────────────────────────────────────────────────────
+  function setConnStatus(connected) {
+    document.getElementById('connDot').className = 'conn-dot' + (connected ? ' connected' : '');
+    document.getElementById('connLabel').textContent = connected
+      ? `Connected — Device: ${deviceId}`
+      : 'Not connected';
+  }
+
+  function setControlsEnabled(on) {
+    document.getElementById('btnOn').disabled    = !on;
+    document.getElementById('btnOff').disabled   = !on;
+    document.getElementById('btnTimer').disabled = !on;
+  }
+
+  function updateRelayUI() {
+    const isOn = relayState === 'ON';
+    document.getElementById('relayDot').className    = 'dot ' + (isOn ? 'on' : 'off');
+    document.getElementById('relayStatus').textContent = 'Relay is ' + relayState;
+    document.getElementById('btnOn').className  = isOn ? 'active-on'  : '';
+    document.getElementById('btnOff').className = isOn ? '' : 'active-off';
+  }
+
+  // ─── TIMER ───────────────────────────────────────────────────────────
+  function startTimer() {
+    const delay    = parseFloat(document.getElementById('timerDelay').value)    || 0;
+    const duration = parseFloat(document.getElementById('timerDuration').value) || 1;
+
+    cancelTimer();
+
+    const totalMs = delay * 60 * 1000;
+    const endTime = Date.now() + totalMs;
+
+    document.getElementById('btnCancelTimer').style.display = 'block';
+    document.getElementById('btnTimer').disabled = true;
+
+    // Countdown display
+    timerInterval = setInterval(() => {
+      const remaining = endTime - Date.now();
+      if (remaining <= 0) {
+        clearInterval(timerInterval);
+        document.getElementById('timerCountdown').textContent = 'Turning ON...';
+      } else {
+        const m = Math.floor(remaining / 60000);
+        const s = Math.floor((remaining % 60000) / 1000);
+        document.getElementById('timerCountdown').textContent =
+          `Turning ON in ${m}m ${s}s`;
+      }
+    }, 500);
+
+    timerTimeout = setTimeout(() => {
+      sendCommand('ON');
+      clearInterval(timerInterval);
+      document.getElementById('timerCountdown').textContent =
+        `ON — turning OFF in ${duration}s`;
+
+      timerOffTimeout = setTimeout(() => {
+        sendCommand('OFF');
+        document.getElementById('timerCountdown').textContent = 'Done.';
+        document.getElementById('btnCancelTimer').style.display = 'none';
+        document.getElementById('btnTimer').disabled = false;
+        setTimeout(() => {
+          document.getElementById('timerCountdown').textContent = '';
+        }, 3000);
+      }, duration * 1000);
+
+    }, totalMs);
+  }
+
+  function cancelTimer() {
+    clearTimeout(timerTimeout);
+    clearTimeout(timerOffTimeout);
+    clearInterval(timerInterval);
+    timerTimeout = timerOffTimeout = timerInterval = null;
+    document.getElementById('timerCountdown').textContent = '';
+    document.getElementById('btnCancelTimer').style.display = 'none';
+    document.getElementById('btnTimer').disabled = !(client && client.connected);
+  }
+
+  // ─── ALARMS ──────────────────────────────────────────────────────────
+  function addAlarm() {
+    const time     = document.getElementById('alarmTime').value;
+    const duration = parseInt(document.getElementById('alarmDuration').value) || 3;
+    if (!time) return;
+    alarms.push({ id: Date.now(), time, duration });
+    saveAlarms();
+    renderAlarms();
+    pushAlarmsToDevice();
+  }
+
+  function removeAlarm(id) {
+    alarms = alarms.filter(a => a.id !== id);
+    saveAlarms();
+    renderAlarms();
+    pushAlarmsToDevice();
+  }
+
+  function saveAlarms() {
+    localStorage.setItem('relayAlarms', JSON.stringify(alarms));
+  }
+
+  // Push alarm list to the ESP8266 so it can fire them independently
+  function pushAlarmsToDevice() {
+    if (!client || !client.connected) return;
+    // Strip the UI-only `id` field — ESP only needs time + duration
+    const payload = JSON.stringify(alarms.map(a => ({ time: a.time, duration: a.duration })));
+    const topic = `relay/${deviceId}/alarms`;
+    client.publish(topic, payload, { qos: 0, retain: true });
+    console.log('Alarms pushed to device:', payload);
+  }
+
+  // Sync UI from what the ESP reports it actually has stored
+  function syncAlarmsFromDevice(json) {
+    try {
+      const deviceAlarms = JSON.parse(json);
+      // Rebuild alarms array from device state, preserving UI ids
+      alarms = deviceAlarms.map((a, i) => ({
+        id: Date.now() + i, // stable enough for UI keys
+        time: a.time,
+        duration: a.duration
+      }));
+      saveAlarms();
+      renderAlarms();
+      console.log('Alarms synced from device:', json);
+    } catch (e) {
+      console.warn('Failed to parse alarm state from device:', e);
+    }
+  }
+
+  function renderAlarms() {
+    const el = document.getElementById('alarmList');
+    if (!alarms.length) { el.innerHTML = '<p style="font-size:0.8rem;color:#aaa">No alarms set.</p>'; return; }
+    el.innerHTML = alarms.map(a => `
+      <div class="alarm-item">
+        <span>⏰ ${a.time} — ON for ${a.duration}s</span>
+        <button class="del-btn" onclick="removeAlarm(${a.id})">✕</button>
+      </div>
+    `).join('');
+  }
+
+  function startAlarmChecker() {
+    // Check every 15 seconds
+    alarmInterval = setInterval(checkAlarms, 15000);
+  }
+
+  function checkAlarms() {
+    if (!client || !client.connected) return;
+    const now = new Date();
+    const hh  = String(now.getHours()).padStart(2, '0');
+    const mm  = String(now.getMinutes()).padStart(2, '0');
+    const currentTime = `${hh}:${mm}`;
+
+    alarms.forEach(alarm => {
+      if (alarm.time === currentTime && !activeAlarmTimeouts[alarm.id]) {
+        // Fire alarm
+        sendCommand('ON');
+        activeAlarmTimeouts[alarm.id] = setTimeout(() => {
+          sendCommand('OFF');
+          // Allow alarm to fire again next day (clear after 61 seconds)
+          setTimeout(() => delete activeAlarmTimeouts[alarm.id], 61000);
+        }, alarm.duration * 1000);
+      }
+    });
+  }
+</script>
+
+</body>
+</html>
