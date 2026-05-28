@@ -157,6 +157,38 @@
     }
 
     .countdown { font-size: 0.8rem; color: #888; margin-top: 8px; min-height: 1.2em; }
+
+    /* Alarm sync */
+    .alarm-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .alarm-header h2 { margin-bottom: 0; }
+    .btn-sync {
+      font-family: monospace;
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: white;
+      cursor: pointer;
+      color: #555;
+      flex: none;
+    }
+    .btn-sync:hover { background: #f0f0f0; }
+    .btn-sync:disabled { opacity: 0.4; cursor: not-allowed; }
+    .badge {
+      font-size: 0.7rem;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .badge-device { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+    .badge-local  { background: #fef9c3; color: #854d0e; border: 1px solid #fef08a; }
+    .sync-status { font-size: 0.75rem; color: #888; margin-top: 8px; min-height: 1.1em; }
   </style>
 </head>
 <body>
@@ -209,7 +241,10 @@
 
 <!-- Alarms -->
 <div class="card">
-  <h2>Alarms</h2>
+  <div class="alarm-header">
+    <h2>Alarms</h2>
+    <button class="btn-sync" id="btnSync" onclick="requestAlarmsFromDevice()" disabled>↻ Sync from device</button>
+  </div>
   <div class="inline-row">
     <div>
       <label>Time (daily)</label>
@@ -221,6 +256,7 @@
     </div>
   </div>
   <button class="btn-full" onclick="addAlarm()">Add Alarm</button>
+  <div class="sync-status" id="syncStatus"></div>
   <div id="alarmList" style="margin-top:12px;"></div>
 </div>
 
@@ -231,11 +267,13 @@
   let topicCommand = '';
   let topicStatus  = '';
   let topicAlarmsState = '';
+  let topicAlarmsGet   = '';
   let relayState   = 'OFF';
   let timerTimeout = null;
   let timerOffTimeout = null;
   let timerInterval = null;
   let alarms = JSON.parse(localStorage.getItem('relayAlarms') || '[]');
+  let alarmSource = localStorage.getItem('relayAlarmSource') || 'local'; // 'device' or 'local'
   let alarmInterval = null;
   let activeAlarmTimeouts = {};
 
@@ -257,6 +295,7 @@
     topicCommand     = `relay/${deviceId}/command`;
     topicStatus      = `relay/${deviceId}/status`;
     topicAlarmsState = `relay/${deviceId}/alarms/state`;
+    topicAlarmsGet   = `relay/${deviceId}/alarms/get`;
     connectMQTT();
   }
 
@@ -277,8 +316,8 @@
       client.subscribe(topicStatus, { qos: 0 });
       client.subscribe(topicAlarmsState, { qos: 0 });
       setControlsEnabled(true);
-      // Re-push saved alarms to device in case it rebooted
-      pushAlarmsToDevice();
+      // Request fresh alarm state from device
+      requestAlarmsFromDevice();
     });
 
     client.on('message', (topic, payload) => {
@@ -311,6 +350,7 @@
     document.getElementById('btnOn').disabled    = !on;
     document.getElementById('btnOff').disabled   = !on;
     document.getElementById('btnTimer').disabled = !on;
+    document.getElementById('btnSync').disabled  = !on;
   }
 
   function updateRelayUI() {
@@ -382,10 +422,11 @@
     const time     = document.getElementById('alarmTime').value;
     const duration = parseInt(document.getElementById('alarmDuration').value) || 3;
     if (!time) return;
-    alarms.push({ id: Date.now(), time, duration });
+    alarms.push({ id: Date.now(), time, duration, source: 'local' });
     saveAlarms();
     renderAlarms();
     pushAlarmsToDevice();
+    setSyncStatus('Alarm added and sent to device.');
   }
 
   function removeAlarm(id) {
@@ -393,10 +434,31 @@
     saveAlarms();
     renderAlarms();
     pushAlarmsToDevice();
+    setSyncStatus('Alarm removed and update sent to device.');
   }
 
   function saveAlarms() {
     localStorage.setItem('relayAlarms', JSON.stringify(alarms));
+    localStorage.setItem('relayAlarmSource', alarmSource);
+  }
+
+  // Ask the ESP8266 to re-broadcast its stored alarms
+  function requestAlarmsFromDevice() {
+    if (!client || !client.connected) return;
+    client.publish(topicAlarmsGet, '1', { qos: 0, retain: false });
+    setSyncStatus('Requesting alarms from device...');
+    // If no response within 4s, show a hint
+    setTimeout(() => {
+      const el = document.getElementById('syncStatus');
+      if (el && el.textContent === 'Requesting alarms from device...') {
+        setSyncStatus('No response — device may be offline or has no alarms set.');
+      }
+    }, 4000);
+  }
+
+  function setSyncStatus(msg) {
+    const el = document.getElementById('syncStatus');
+    if (el) el.textContent = msg;
   }
 
   // Push alarm list to the ESP8266 so it can fire them independently
@@ -413,16 +475,20 @@
   function syncAlarmsFromDevice(json) {
     try {
       const deviceAlarms = JSON.parse(json);
-      // Rebuild alarms array from device state, preserving UI ids
       alarms = deviceAlarms.map((a, i) => ({
-        id: Date.now() + i, // stable enough for UI keys
+        id: Date.now() + i,
         time: a.time,
-        duration: a.duration
+        duration: a.duration,
+        source: 'device'
       }));
+      alarmSource = 'device';
       saveAlarms();
       renderAlarms();
+      const now = new Date().toLocaleTimeString();
+      setSyncStatus(`Synced from device at ${now} — ${alarms.length} alarm(s)`);
       console.log('Alarms synced from device:', json);
     } catch (e) {
+      setSyncStatus('Sync failed — could not parse device response.');
       console.warn('Failed to parse alarm state from device:', e);
     }
   }
@@ -430,12 +496,17 @@
   function renderAlarms() {
     const el = document.getElementById('alarmList');
     if (!alarms.length) { el.innerHTML = '<p style="font-size:0.8rem;color:#aaa">No alarms set.</p>'; return; }
-    el.innerHTML = alarms.map(a => `
-      <div class="alarm-item">
-        <span>⏰ ${a.time} — ON for ${a.duration}s</span>
-        <button class="del-btn" onclick="removeAlarm(${a.id})">✕</button>
-      </div>
-    `).join('');
+    el.innerHTML = alarms.map(a => {
+      const badge = a.source === 'device'
+        ? '<span class="badge badge-device">device</span>'
+        : '<span class="badge badge-local">local</span>';
+      return `
+        <div class="alarm-item">
+          <span>⏰ ${a.time} — ON for ${a.duration}s ${badge}</span>
+          <button class="del-btn" onclick="removeAlarm(${a.id})">✕</button>
+        </div>
+      `;
+    }).join('');
   }
 
   function startAlarmChecker() {
